@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SalvusMed — Medicine Substitute &amp; Safety Guide</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <h1 class="logo">Salvus<span>Med</span></h1>
+      <p class="tagline">BM25 vs TF-IDF symptom search · composition alternatives · side effects</p>
+      <p class="disclaimer">Informational only — not medical advice. Consult a doctor before switching medicines.</p>
+    </header>
+
+    <section class="search-section">
+      <div class="tabs" role="tablist">
+        <button type="button" class="tab active" data-mode="name" role="tab" aria-selected="true">By medicine name</button>
+        <button type="button" class="tab" data-mode="symptom" role="tab" aria-selected="false">By symptom / condition</button>
+      </div>
+
+      <div class="search-box">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.5 6.5 0 1 0 14 15.5l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+        </svg>
+        <input
+          type="search"
+          id="searchInput"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Search medicine name (e.g. augmentin, azee)"
+          aria-label="Search"
+        />
+        <button type="button" id="clearBtn" class="clear-btn" hidden aria-label="Clear">×</button>
+      </div>
+      <p class="status" id="status">Type to search. Symptom mode compares BM25 and TF-IDF.</p>
+
+      <section class="compare-section" id="compareSection" hidden>
+        <h2 class="section-title">Retrieval comparison</h2>
+        <div class="score-strip" id="scoreStrip"></div>
+        <div class="algo-panels">
+          <article class="algo-panel" data-algo="bm25">
+            <h3>BM25 <span class="badge">Okapi</span></h3>
+            <ul class="panel-list" id="list-bm25"></ul>
+          </article>
+          <article class="algo-panel" data-algo="tfidf">
+            <h3>TF-IDF <span class="badge">sklearn</span></h3>
+            <ul class="panel-list" id="list-tfidf"></ul>
+          </article>
+        </div>
+        <h2 class="section-title combined-title">Combined results</h2>
+      </section>
+
+      <ul class="results-list" id="resultsList" hidden></ul>
+    </section>
+
+    <section class="detail-section" id="detailSection" hidden>
+      <article class="detail-card">
+        <div class="detail-main">
+          <div class="detail-text">
+            <h2 id="detailName"></h2>
+            <p class="meta" id="detailManufacturer"></p>
+            <p class="meta" id="detailComposition"></p>
+            <p class="meta uses" id="detailUses"></p>
+
+            <div class="review-bars">
+              <div class="review-row">
+                <span>Excellent</span>
+                <div class="bar"><div class="fill excellent" id="barExcellent"></div></div>
+                <span id="pctExcellent"></span>
+              </div>
+              <div class="review-row">
+                <span>Average</span>
+                <div class="bar"><div class="fill average" id="barAverage"></div></div>
+                <span id="pctAverage"></span>
+              </div>
+              <div class="review-row">
+                <span>Poor</span>
+                <div class="bar"><div class="fill poor" id="barPoor"></div></div>
+                <span id="pctPoor"></span>
+              </div>
+            </div>
+          </div>
+          <img class="detail-image" id="detailImage" alt="" hidden />
+        </div>
+
+        <div class="side-effects-block">
+          <h3>Side effects</h3>
+          <ul class="chip-list" id="sideEffectsList"></ul>
+        </div>
+      </article>
+
+      <section class="alternatives-block">
+        <div class="alt-header">
+          <h3>Alternatives <span class="badge">Same composition &amp; dosage</span></h3>
+          <p class="alt-note" id="altNote">Sorted by review score (Excellent ×2 + Average − Poor)</p>
+        </div>
+        <div class="alt-table-wrap">
+          <table class="alt-table" id="altTable">
+            <thead>
+              <tr>
+                <th>Medicine</th>
+                <th>Manufacturer</th>
+                <th>Reviews</th>
+                <th>Side effects</th>
+              </tr>
+            </thead>
+            <tbody id="altBody"></tbody>
+          </table>
+        </div>
+        <p class="alt-empty" id="altEmpty" hidden>No other brands with the same composition found.</p>
+      </section>
+    </section>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
