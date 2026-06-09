@@ -154,26 +154,60 @@ class MedicineIndex:
             item["source"] = source
         return item
 
+    @staticmethod
+    def _match_ratio(med: Medicine, query_tokens: list[str]) -> float:
+        if not query_tokens:
+            return 0.0
+        med_tokens = set(med.search_tokens)
+        matched = sum(1 for token in query_tokens if token in med_tokens)
+        return matched / len(query_tokens)
+
     def _rank_scores(
         self,
         scores: list[float] | object,
         source: str,
         limit: int,
         min_score: float = 1e-9,
-    ) -> list[dict]:
-        ranked = sorted(
-            enumerate(scores),
-            key=lambda item: (-item[1], -self.medicines[item[0]].review_score),
-        )
-        results: list[dict] = []
-        for idx, score in ranked:
+        query_tokens: list[str] | None = None,
+    ) -> tuple[list[dict], int]:
+        ranked: list[tuple[float, float, int]] = []
+        for idx, score in enumerate(scores):
             if score <= min_score:
                 continue
             med = self.medicines[idx]
-            results.append(self._summary(med, score, source))
-            if len(results) >= limit:
-                break
-        return results
+            if query_tokens:
+                ratio = self._match_ratio(med, query_tokens)
+                if ratio <= 0.0:
+                    continue
+                # Penalize partial matches so extra query words refine results.
+                adjusted = float(score) * (ratio ** len(query_tokens))
+            else:
+                ratio = 1.0
+                adjusted = float(score)
+
+            ranked.append((adjusted, ratio, idx))
+
+        ranked.sort(
+            key=lambda item: (
+                -item[0],
+                -item[1],
+                -self.medicines[item[2]].review_score,
+            )
+        )
+
+        if not ranked:
+            return [], 0
+
+        top_score = ranked[0][0]
+        relevance_floor = max(min_score, top_score * 0.75)
+        qualified = [item for item in ranked if item[0] >= relevance_floor]
+
+        results: list[dict] = []
+        for adjusted, _ratio, idx in qualified[:limit]:
+            med = self.medicines[idx]
+            results.append(self._summary(med, adjusted, source))
+
+        return results, len(qualified)
 
     def to_detail(self, med: Medicine) -> dict:
         return {
@@ -217,12 +251,14 @@ class MedicineIndex:
         tokens = tokenize(query)
         if not tokens:
             return []
-        return self._rank_scores(
+        results, _total = self._rank_scores(
             self.bm25.get_scores(tokens),
             source="bm25",
             limit=limit,
             min_score=0.0,
+            query_tokens=tokens,
         )
+        return results
 
     def search_by_symptom_tfidf(self, query: str, limit: int = 15) -> list[dict]:
         if self.tfidf_vectorizer is None or self.tfidf_matrix is None:
@@ -233,7 +269,13 @@ class MedicineIndex:
 
         query_vec = self.tfidf_vectorizer.transform([" ".join(tokens)])
         scores = (self.tfidf_matrix @ query_vec.T).toarray().ravel()
-        return self._rank_scores(scores, source="tfidf", limit=limit)
+        results, _total = self._rank_scores(
+            scores,
+            source="tfidf",
+            limit=limit,
+            query_tokens=tokens,
+        )
+        return results
 
     def search_by_symptom(self, query: str, limit: int = 15) -> list[dict]:
         return self.search_by_symptom_bm25(query, limit=limit)
@@ -244,8 +286,38 @@ class MedicineIndex:
         per_algo: int = 8,
         combined_limit: int = 12,
     ) -> dict:
-        bm25_results = self.search_by_symptom_bm25(query, limit=per_algo)
-        tfidf_results = self.search_by_symptom_tfidf(query, limit=per_algo)
+        tokens = tokenize(query)
+        if not tokens:
+            return {
+                "query": query,
+                "combined": [],
+                "algorithms": {"bm25": [], "tfidf": []},
+                "stats": {
+                    "bm25": 0,
+                    "tfidf": 0,
+                    "bm25_shown": 0,
+                    "tfidf_shown": 0,
+                    "max_hits": 1,
+                },
+            }
+
+        bm25_results, bm25_total = self._rank_scores(
+            self.bm25.get_scores(tokens) if self.bm25 else [],
+            source="bm25",
+            limit=per_algo,
+            min_score=0.0,
+            query_tokens=tokens,
+        )
+        tfidf_results, tfidf_total = self._rank_scores(
+            (self.tfidf_matrix @ self.tfidf_vectorizer.transform([" ".join(tokens)]).T)
+            .toarray()
+            .ravel()
+            if self.tfidf_vectorizer is not None and self.tfidf_matrix is not None
+            else [],
+            source="tfidf",
+            limit=per_algo,
+            query_tokens=tokens,
+        )
 
         combined: list[dict] = []
         seen: set[str] = set()
@@ -258,7 +330,7 @@ class MedicineIndex:
             if len(combined) >= combined_limit:
                 break
 
-        max_hits = max(len(bm25_results), len(tfidf_results), 1)
+        max_hits = max(bm25_total, tfidf_total, 1)
         return {
             "query": query,
             "combined": combined,
@@ -267,8 +339,10 @@ class MedicineIndex:
                 "tfidf": tfidf_results,
             },
             "stats": {
-                "bm25": len(bm25_results),
-                "tfidf": len(tfidf_results),
+                "bm25": bm25_total,
+                "tfidf": tfidf_total,
+                "bm25_shown": len(bm25_results),
+                "tfidf_shown": len(tfidf_results),
                 "max_hits": max_hits,
             },
         }

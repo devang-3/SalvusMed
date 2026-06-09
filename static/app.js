@@ -89,10 +89,12 @@ async function runSearch() {
 
     renderCompare(data);
     renderResults(data.combined || [], query, true);
-    const bm25Count = data.stats?.bm25 || 0;
-    const tfidfCount = data.stats?.tfidf || 0;
-    statusEl.textContent = bm25Count || tfidfCount
-      ? `BM25: ${bm25Count} hit(s) · TF-IDF: ${tfidfCount} hit(s) — click any result`
+    const bm25Total = data.stats?.bm25 ?? 0;
+    const tfidfTotal = data.stats?.tfidf ?? 0;
+    const bm25Shown = data.stats?.bm25_shown ?? 0;
+    const tfidfShown = data.stats?.tfidf_shown ?? 0;
+    statusEl.textContent = bm25Total || tfidfTotal
+      ? `BM25: ${bm25Total} relevant (${bm25Shown} shown) · TF-IDF: ${tfidfTotal} relevant (${tfidfShown} shown) — click any result`
       : "No matches. Try another symptom.";
   } catch (err) {
     setStatusError("Search failed. Restart server: python app.py → http://127.0.0.1:5001");
@@ -116,20 +118,20 @@ async function runSymptomFallback(query) {
 function renderCompare(data) {
   const stats = data.stats || {};
   const maxHits = stats.max_hits || 1;
-  const bm25Count = stats.bm25 || 0;
-  const tfidfCount = stats.tfidf || 0;
+  const bm25Total = stats.bm25 ?? 0;
+  const tfidfTotal = stats.tfidf ?? 0;
 
   compareSection.hidden = false;
   scoreStrip.innerHTML = `
     <div class="score-row">
       <span class="score-label">BM25</span>
-      <div class="score-bar"><div class="score-fill bm25" style="width:${(bm25Count / maxHits) * 100}%"></div></div>
-      <span class="score-count">${bm25Count}</span>
+      <div class="score-bar"><div class="score-fill bm25" style="width:${(bm25Total / maxHits) * 100}%"></div></div>
+      <span class="score-count">${bm25Total}</span>
     </div>
     <div class="score-row">
       <span class="score-label">TF-IDF</span>
-      <div class="score-bar"><div class="score-fill tfidf" style="width:${(tfidfCount / maxHits) * 100}%"></div></div>
-      <span class="score-count">${tfidfCount}</span>
+      <div class="score-bar"><div class="score-fill tfidf" style="width:${(tfidfTotal / maxHits) * 100}%"></div></div>
+      <span class="score-count">${tfidfTotal}</span>
     </div>
   `;
 

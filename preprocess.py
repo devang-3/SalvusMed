@@ -41,9 +41,26 @@ def normalize_uses(text: str) -> str:
     return cleaned
 
 
+def normalize_token(token: str) -> str:
+    """Map simple plural/tense variants to one form (infection/infections)."""
+    if len(token) <= 3:
+        return token
+    if (
+        token.endswith("s")
+        and not token.endswith(("ss", "us", "is"))
+        and token[-2] != "e"
+    ):
+        return token[:-1]
+    return token
+
+
 def tokenize(text: str) -> list[str]:
     tokens = _TOKEN_RE.findall((text or "").lower())
-    return [t for t in tokens if len(t) > 1 and t not in _STOPWORDS]
+    return [
+        normalize_token(t)
+        for t in tokens
+        if len(t) > 1 and t not in _STOPWORDS
+    ]
 
 
 def split_side_effects(text: str) -> list[str]:
