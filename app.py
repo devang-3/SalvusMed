@@ -1,5 +1,5 @@
 """
-SalvusMed — BM25 vs TF-IDF symptom search + composition alternatives.
+SalvusMed — BM25 vs TF-IDF vs BoW cosine symptom search + composition alternatives.
 
 Usage:
     cd SalvusMed
@@ -66,6 +66,8 @@ def api_search_symptom():
     engine = request.args.get("engine", "bm25").strip().lower()
     if engine == "tfidf":
         results = index.search_by_symptom_tfidf(query, limit=limit)
+    elif engine == "cosine":
+        results = index.search_by_symptom_cosine(query, limit=limit)
     else:
         results = index.search_by_symptom_bm25(query, limit=limit)
     return jsonify({"query": query, "engine": engine, "results": results})
@@ -129,7 +131,7 @@ def main() -> None:
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
-    print("Loading Medicine_Details.csv and building BM25 + TF-IDF indexes...")
+    print("Loading Medicine_Details.csv and building BM25 + TF-IDF + BoW indexes...")
     index = MedicineIndex.build()
     print(f"Ready: {len(index.medicines):,} medicines indexed.")
 

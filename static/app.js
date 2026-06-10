@@ -41,7 +41,7 @@ clearBtn.addEventListener("click", () => {
   resultsList.hidden = true;
   compareSection.hidden = true;
   detailSection.hidden = true;
-  statusEl.textContent = "Type to search. Symptom mode compares BM25 and TF-IDF.";
+  statusEl.textContent = "Type to search. Symptom mode compares BM25, TF-IDF, and BoW cosine.";
 });
 
 async function runSearch() {
@@ -54,7 +54,7 @@ async function runSearch() {
     detailSection.hidden = true;
     statusEl.textContent = mode === "name"
       ? "Type a medicine name."
-      : "Type a symptom or condition to compare BM25 vs TF-IDF.";
+      : "Type symptom(s). Use commas for separate concerns (e.g. belly pain, sugar bp).";
     return;
   }
 
@@ -89,13 +89,36 @@ async function runSearch() {
 
     renderCompare(data);
     renderResults(data.combined || [], query, true);
-    const bm25Total = data.stats?.bm25 ?? 0;
-    const tfidfTotal = data.stats?.tfidf ?? 0;
-    const bm25Shown = data.stats?.bm25_shown ?? 0;
-    const tfidfShown = data.stats?.tfidf_shown ?? 0;
-    statusEl.textContent = bm25Total || tfidfTotal
-      ? `BM25: ${bm25Total} relevant (${bm25Shown} shown) · TF-IDF: ${tfidfTotal} relevant (${tfidfShown} shown) — click any result`
-      : "No matches. Try another symptom.";
+    const stats = data.stats || {};
+    const bm25Strong = stats.bm25 ?? 0;
+    const tfidfStrong = stats.tfidf ?? 0;
+    const cosineStrong = stats.cosine ?? 0;
+    const bm25Shown = stats.bm25_shown ?? 0;
+    const tfidfShown = stats.tfidf_shown ?? 0;
+    const cosineShown = stats.cosine_shown ?? 0;
+    const bm25Rel = stats.bm25_relevant ?? 0;
+    const tfidfRel = stats.tfidf_relevant ?? 0;
+    const cosineRel = stats.cosine_relevant ?? 0;
+    const clauseNote = formatClauseStats(stats);
+    const expansionNote = formatExpansion(data);
+    const anyMatch = stats.any_clause_matches ?? 0;
+
+    if (!anyMatch && !bm25Shown && !tfidfShown && !cosineShown) {
+      statusEl.textContent = clauseNote
+        ? `No matches for combined filter. ${clauseNote}`
+        : "No matches. Try another symptom.";
+      return;
+    }
+
+    statusEl.textContent = [
+      clauseNote,
+      `any clause: ${anyMatch}`,
+      `BM25 ${bm25Strong} top / ${bm25Rel} related (${bm25Shown} shown)`,
+      `TF-IDF ${tfidfStrong} top / ${tfidfRel} related (${tfidfShown} shown)`,
+      `Cosine ${cosineStrong} top / ${cosineRel} related (${cosineShown} shown)`,
+      expansionNote ? `expanded: ${expansionNote}` : "",
+      "click any result",
+    ].filter(Boolean).join(" · ");
   } catch (err) {
     setStatusError("Search failed. Restart server: python app.py → http://127.0.0.1:5001");
     console.error(err);
@@ -115,28 +138,34 @@ async function runSymptomFallback(query) {
     : "No matches. Try another symptom.";
 }
 
+const COMPARE_ALGOS = ["bm25", "tfidf", "cosine"];
+
 function renderCompare(data) {
   const stats = data.stats || {};
   const maxHits = stats.max_hits || 1;
-  const bm25Total = stats.bm25 ?? 0;
-  const tfidfTotal = stats.tfidf ?? 0;
+  const algoLabels = {
+    bm25: "BM25",
+    tfidf: "TF-IDF",
+    cosine: "Cosine",
+  };
+  const algoTotals = {
+    bm25: stats.bm25_relevant ?? stats.bm25 ?? 0,
+    tfidf: stats.tfidf_relevant ?? stats.tfidf ?? 0,
+    cosine: stats.cosine_relevant ?? stats.cosine ?? 0,
+  };
 
   compareSection.hidden = false;
-  scoreStrip.innerHTML = `
+  scoreStrip.innerHTML = COMPARE_ALGOS.map((algo) => `
     <div class="score-row">
-      <span class="score-label">BM25</span>
-      <div class="score-bar"><div class="score-fill bm25" style="width:${(bm25Total / maxHits) * 100}%"></div></div>
-      <span class="score-count">${bm25Total}</span>
+      <span class="score-label">${algoLabels[algo]}</span>
+      <div class="score-bar"><div class="score-fill ${algo}" style="width:${(algoTotals[algo] / maxHits) * 100}%"></div></div>
+      <span class="score-count">${algoTotals[algo]}</span>
     </div>
-    <div class="score-row">
-      <span class="score-label">TF-IDF</span>
-      <div class="score-bar"><div class="score-fill tfidf" style="width:${(tfidfTotal / maxHits) * 100}%"></div></div>
-      <span class="score-count">${tfidfTotal}</span>
-    </div>
-  `;
+  `).join("");
 
-  renderAlgoPanel("bm25", data.algorithms?.bm25 || []);
-  renderAlgoPanel("tfidf", data.algorithms?.tfidf || []);
+  COMPARE_ALGOS.forEach((algo) => {
+    renderAlgoPanel(algo, data.algorithms?.[algo] || []);
+  });
 }
 
 function renderAlgoPanel(algo, items) {
@@ -283,6 +312,19 @@ function renderAlternatives(data) {
     tr.addEventListener("click", () => loadMedicine(alt.name, null));
     body.appendChild(tr);
   });
+}
+
+function formatExpansion(data) {
+  const raw = (data.tokens || []).join(", ");
+  const expanded = (data.expanded_tokens || []).join(", ");
+  if (!expanded || expanded === raw) return "";
+  return expanded;
+}
+
+function formatClauseStats(stats) {
+  const clauses = stats.clause_matches || [];
+  if (!clauses.length) return "";
+  return clauses.map((c) => `${c.label} (${c.matches})`).join(", ");
 }
 
 function truncate(text, max) {

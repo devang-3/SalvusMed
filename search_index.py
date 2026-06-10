@@ -1,4 +1,4 @@
-"""Load dataset, BM25 + TF-IDF symptom search, name search, composition alternatives."""
+"""Load dataset, BM25 + TF-IDF + BoW cosine symptom search, name search, composition alternatives."""
 from __future__ import annotations
 
 import csv
@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from rank_bm25 import BM25Okapi
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 from composition import composition_signature
 from paths import DATASET_PATH
@@ -15,6 +16,15 @@ from preprocess import (
     review_score,
     split_side_effects,
     tokenize,
+)
+from synonyms import (
+    clause_coverage,
+    count_clause_matches,
+    describe_expansion_for_clauses,
+    flatten_clause_tokens,
+    parse_query_clauses,
+    query_matches,
+    scoring_tokens_for_clauses,
 )
 
 
@@ -47,6 +57,8 @@ class MedicineIndex:
     bm25: BM25Okapi | None = None
     tfidf_vectorizer: TfidfVectorizer | None = None
     tfidf_matrix: object | None = None
+    bow_vectorizer: CountVectorizer | None = None
+    bow_matrix: object | None = None
 
     @classmethod
     def build(cls, csv_path: Path | None = None) -> "MedicineIndex":
@@ -107,14 +119,22 @@ class MedicineIndex:
         bm25 = BM25Okapi(bm25_corpus) if bm25_corpus else None
         tfidf_vectorizer = None
         tfidf_matrix = None
+        bow_vectorizer = None
+        bow_matrix = None
         if bm25_corpus:
             joined_corpus = [" ".join(tokens) for tokens in bm25_corpus]
+            token_analyzer = lambda text: text.split()
             tfidf_vectorizer = TfidfVectorizer(
-                analyzer=lambda text: text.split(),
+                analyzer=token_analyzer,
                 lowercase=False,
                 sublinear_tf=True,
             )
             tfidf_matrix = tfidf_vectorizer.fit_transform(joined_corpus)
+            bow_vectorizer = CountVectorizer(
+                analyzer=token_analyzer,
+                lowercase=False,
+            )
+            bow_matrix = bow_vectorizer.fit_transform(joined_corpus)
 
         return cls(
             medicines=medicines,
@@ -125,6 +145,8 @@ class MedicineIndex:
             bm25=bm25,
             tfidf_vectorizer=tfidf_vectorizer,
             tfidf_matrix=tfidf_matrix,
+            bow_vectorizer=bow_vectorizer,
+            bow_matrix=bow_matrix,
         )
 
     def lookup(self, name: str) -> Medicine | None:
@@ -154,38 +176,30 @@ class MedicineIndex:
             item["source"] = source
         return item
 
-    @staticmethod
-    def _match_ratio(med: Medicine, query_tokens: list[str]) -> float:
-        if not query_tokens:
-            return 0.0
-        med_tokens = set(med.search_tokens)
-        matched = sum(1 for token in query_tokens if token in med_tokens)
-        return matched / len(query_tokens)
-
     def _rank_scores(
         self,
         scores: list[float] | object,
         source: str,
         limit: int,
         min_score: float = 1e-9,
-        query_tokens: list[str] | None = None,
-    ) -> tuple[list[dict], int]:
+        clauses: list[list[str]] | None = None,
+    ) -> tuple[list[dict], int, int]:
         ranked: list[tuple[float, float, int]] = []
         for idx, score in enumerate(scores):
             if score <= min_score:
                 continue
             med = self.medicines[idx]
-            if query_tokens:
-                ratio = self._match_ratio(med, query_tokens)
-                if ratio <= 0.0:
+            if clauses:
+                med_tokens = set(med.search_tokens)
+                if not query_matches(med_tokens, clauses):
                     continue
-                # Penalize partial matches so extra query words refine results.
-                adjusted = float(score) * (ratio ** len(query_tokens))
+                coverage = clause_coverage(med_tokens, clauses)
+                adjusted = float(score) * (1.0 + coverage)
             else:
-                ratio = 1.0
+                coverage = 1.0
                 adjusted = float(score)
 
-            ranked.append((adjusted, ratio, idx))
+            ranked.append((adjusted, coverage, idx))
 
         ranked.sort(
             key=lambda item: (
@@ -196,18 +210,20 @@ class MedicineIndex:
         )
 
         if not ranked:
-            return [], 0
+            return [], 0, 0
 
         top_score = ranked[0][0]
-        relevance_floor = max(min_score, top_score * 0.75)
-        qualified = [item for item in ranked if item[0] >= relevance_floor]
+        display_floor = max(min_score, top_score * 0.35)
+        strong_floor = max(min_score, top_score * 0.75)
+        qualified = [item for item in ranked if item[0] >= display_floor]
+        strong_hits = sum(1 for item in ranked if item[0] >= strong_floor)
 
         results: list[dict] = []
-        for adjusted, _ratio, idx in qualified[:limit]:
+        for adjusted, _coverage, idx in qualified[:limit]:
             med = self.medicines[idx]
             results.append(self._summary(med, adjusted, source))
 
-        return results, len(qualified)
+        return results, strong_hits, len(qualified)
 
     def to_detail(self, med: Medicine) -> dict:
         return {
@@ -248,32 +264,52 @@ class MedicineIndex:
     def search_by_symptom_bm25(self, query: str, limit: int = 15) -> list[dict]:
         if self.bm25 is None:
             return []
-        tokens = tokenize(query)
-        if not tokens:
+        clauses = parse_query_clauses(query)
+        if not clauses or not flatten_clause_tokens(clauses):
             return []
-        results, _total = self._rank_scores(
-            self.bm25.get_scores(tokens),
+        search_tokens = scoring_tokens_for_clauses(clauses)
+        results, _strong, _relevant = self._rank_scores(
+            self.bm25.get_scores(search_tokens),
             source="bm25",
             limit=limit,
             min_score=0.0,
-            query_tokens=tokens,
+            clauses=clauses,
         )
         return results
 
     def search_by_symptom_tfidf(self, query: str, limit: int = 15) -> list[dict]:
         if self.tfidf_vectorizer is None or self.tfidf_matrix is None:
             return []
-        tokens = tokenize(query)
-        if not tokens:
+        clauses = parse_query_clauses(query)
+        if not clauses or not flatten_clause_tokens(clauses):
             return []
 
-        query_vec = self.tfidf_vectorizer.transform([" ".join(tokens)])
+        search_tokens = scoring_tokens_for_clauses(clauses)
+        query_vec = self.tfidf_vectorizer.transform([" ".join(search_tokens)])
         scores = (self.tfidf_matrix @ query_vec.T).toarray().ravel()
-        results, _total = self._rank_scores(
+        results, _strong, _relevant = self._rank_scores(
             scores,
             source="tfidf",
             limit=limit,
-            query_tokens=tokens,
+            clauses=clauses,
+        )
+        return results
+
+    def search_by_symptom_cosine(self, query: str, limit: int = 15) -> list[dict]:
+        if self.bow_vectorizer is None or self.bow_matrix is None:
+            return []
+        clauses = parse_query_clauses(query)
+        if not clauses or not flatten_clause_tokens(clauses):
+            return []
+
+        search_tokens = scoring_tokens_for_clauses(clauses)
+        query_vec = self.bow_vectorizer.transform([" ".join(search_tokens)])
+        scores = cosine_similarity(query_vec, self.bow_matrix).ravel()
+        results, _strong, _relevant = self._rank_scores(
+            scores,
+            source="cosine",
+            limit=limit,
+            clauses=clauses,
         )
         return results
 
@@ -286,42 +322,73 @@ class MedicineIndex:
         per_algo: int = 8,
         combined_limit: int = 12,
     ) -> dict:
-        tokens = tokenize(query)
-        if not tokens:
+        clauses = parse_query_clauses(query)
+        flat_tokens = flatten_clause_tokens(clauses)
+        if not clauses or not flat_tokens:
             return {
                 "query": query,
+                "tokens": [],
+                "clauses": [],
+                "expanded_tokens": [],
                 "combined": [],
-                "algorithms": {"bm25": [], "tfidf": []},
+                "algorithms": {"bm25": [], "tfidf": [], "cosine": []},
                 "stats": {
                     "bm25": 0,
                     "tfidf": 0,
+                    "cosine": 0,
                     "bm25_shown": 0,
                     "tfidf_shown": 0,
+                    "cosine_shown": 0,
+                    "bm25_relevant": 0,
+                    "tfidf_relevant": 0,
+                    "cosine_relevant": 0,
+                    "clause_matches": [],
+                    "any_clause_matches": 0,
                     "max_hits": 1,
                 },
             }
 
-        bm25_results, bm25_total = self._rank_scores(
-            self.bm25.get_scores(tokens) if self.bm25 else [],
+        search_tokens = scoring_tokens_for_clauses(clauses)
+        joined = " ".join(search_tokens)
+        clause_stats = count_clause_matches(self.medicines, clauses)
+        any_clause_matches = sum(
+            1
+            for med in self.medicines
+            if query_matches(set(med.search_tokens), clauses)
+        )
+
+        bm25_results, bm25_strong, bm25_relevant = self._rank_scores(
+            self.bm25.get_scores(search_tokens) if self.bm25 else [],
             source="bm25",
             limit=per_algo,
             min_score=0.0,
-            query_tokens=tokens,
+            clauses=clauses,
         )
-        tfidf_results, tfidf_total = self._rank_scores(
-            (self.tfidf_matrix @ self.tfidf_vectorizer.transform([" ".join(tokens)]).T)
+        tfidf_results, tfidf_strong, tfidf_relevant = self._rank_scores(
+            (self.tfidf_matrix @ self.tfidf_vectorizer.transform([joined]).T)
             .toarray()
             .ravel()
             if self.tfidf_vectorizer is not None and self.tfidf_matrix is not None
             else [],
             source="tfidf",
             limit=per_algo,
-            query_tokens=tokens,
+            clauses=clauses,
+        )
+        cosine_results, cosine_strong, cosine_relevant = self._rank_scores(
+            cosine_similarity(
+                self.bow_vectorizer.transform([joined]),
+                self.bow_matrix,
+            ).ravel()
+            if self.bow_vectorizer is not None and self.bow_matrix is not None
+            else [],
+            source="cosine",
+            limit=per_algo,
+            clauses=clauses,
         )
 
         combined: list[dict] = []
         seen: set[str] = set()
-        for item in bm25_results + tfidf_results:
+        for item in bm25_results + tfidf_results + cosine_results:
             key = item["name"].lower()
             if key in seen:
                 continue
@@ -330,19 +397,38 @@ class MedicineIndex:
             if len(combined) >= combined_limit:
                 break
 
-        max_hits = max(bm25_total, tfidf_total, 1)
+        max_hits = max(
+            bm25_strong,
+            tfidf_strong,
+            cosine_strong,
+            bm25_relevant,
+            tfidf_relevant,
+            cosine_relevant,
+            1,
+        )
         return {
             "query": query,
+            "tokens": flat_tokens,
+            "clauses": clause_stats,
+            "expanded_tokens": describe_expansion_for_clauses(clauses),
             "combined": combined,
             "algorithms": {
                 "bm25": bm25_results,
                 "tfidf": tfidf_results,
+                "cosine": cosine_results,
             },
             "stats": {
-                "bm25": bm25_total,
-                "tfidf": tfidf_total,
+                "bm25": bm25_strong,
+                "tfidf": tfidf_strong,
+                "cosine": cosine_strong,
                 "bm25_shown": len(bm25_results),
                 "tfidf_shown": len(tfidf_results),
+                "cosine_shown": len(cosine_results),
+                "bm25_relevant": bm25_relevant,
+                "tfidf_relevant": tfidf_relevant,
+                "cosine_relevant": cosine_relevant,
+                "clause_matches": clause_stats,
+                "any_clause_matches": any_clause_matches,
                 "max_hits": max_hits,
             },
         }
